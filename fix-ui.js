@@ -205,12 +205,102 @@ if(SCREENS.roleoverview){
     <p class="small" style="margin:15px 0">최근 월은 맨 오른쪽 숫자예요. 빈 값 보정과 예측 재계산은 예측 탭에서 할 수 있어요.</p>`;
   }};
 }
+
+/* ---------- 5. SCM 관리: 팀원 비밀번호 초기화·계정 삭제·연습 데이터 초기화 ---------- */
+const isSCM=()=>S.role==="SCM 수요계획팀"&&S.online&&!S.demo;
+if(SCREENS.settings){
+  const setHtml=SCREENS.settings.html;
+  SCREENS.settings.html=()=>{
+    const h=setHtml(); if(!isSCM()) return h;
+    const others=(S.accounts||[]).filter(a=>a.id!==S.account?.id);
+    return h+`<div class="sec">팀원 계정 관리 · SCM 전용</div>
+      <div class="card">${others.length?others.map(a=>`<div class="row"><div class="grow"><div class="t">${esc(a.name)}</div><div class="s">${esc(a.role||"직무 미정")} · ${a.hasPin?"비밀번호 설정됨":"비밀번호 미설정"}</div></div>
+        <button type="button" class="adj-mini" data-adm="resetPin|${esc(a.id)}|${esc(a.name)}">비번 초기화</button>
+        <button type="button" class="adj-mini danger" data-adm="deleteAccount|${esc(a.id)}|${esc(a.name)}">삭제</button></div>`).join(""):'<div class="small">다른 팀원 계정이 없어요</div>'}</div>
+      <p class="small" style="margin:6px 0 0">비밀번호를 초기화하면 그 팀원은 「새 계정 만들기」에서 같은 이름을 넣고 직무·비밀번호를 다시 정해요.</p>
+      <div class="sec">연습 데이터</div>
+      <button type="button" class="btn" style="width:100%;background:#F04452" data-adm="resetPractice||">연습 데이터 초기화</button>
+      <p class="small" style="margin:6px 0 18px">판매계획·업무(주문·재고·생산·협의)·판매데이터·로그를 처음 상태로 되돌려요. 계정은 그대로 남아요.</p>`;
+  };
+}
+document.addEventListener("click",e=>{
+  const t=e.target.closest("[data-adm]"); if(!t) return;
+  const [op,id,name]=t.dataset.adm.split("|");
+  const msg=op==="resetPin"?`${name}님의 비밀번호를 초기화할까요?<br><span class="small">접속 중이면 로그아웃돼요.</span>`
+    :op==="deleteAccount"?`${name}님의 계정을 삭제할까요?<br><span class="small">되돌릴 수 없어요.</span>`
+    :`연습 데이터를 모두 초기화할까요?<br><span class="small">판매계획·업무·판매데이터·로그가 지워지고 되돌릴 수 없어요.</span>`;
+  openSheet(`<h2 style="margin:0 0 10px">${msg}</h2><div style="display:flex;gap:8px;margin-top:14px"><button class="btn sub" style="flex:1" id="admNo">취소</button><button class="btn" style="flex:1;background:#F04452" id="admOk">확인</button></div>`);
+  document.getElementById("admNo").onclick=()=>closeSheet();
+  document.getElementById("admOk").onclick=async()=>{
+    try{
+      await api("accounts",{method:"PUT",body:{op,accountId:id||undefined}});
+      closeSheet();
+      toast(op==="resetPin"?"비밀번호를 초기화했어요":op==="deleteAccount"?"계정을 삭제했어요":"연습 데이터를 초기화했어요");
+      if(op==="resetPractice"){ S.plans=[]; S.lastPlan=null; S.workspace=null; S.workAt=0; S.auditLogs=[]; }
+      if(typeof poll==="function") await poll();
+      if(typeof loadAudit==="function") void loadAudit();
+      if(typeof window.refreshWorkspace==="function"){ S.workBusy=false; void window.refreshWorkspace(true); }
+      baseRefresh();
+    }catch(err){ toast(err.message||"처리하지 못했어요"); }
+  };
+});
+
+/* ---------- 6. 발표용 둘러보기 (저장 안 됨) ---------- */
+if(SCREENS.login&&typeof startDemo==="function"){
+  const loginHtml=SCREENS.login.html;
+  SCREENS.login.html=()=>loginHtml().replace(/<\/div>\s*$/,`<button type="button" class="adj-demo" data-adj-demo>발표용 둘러보기 · 계정 없이 세 직무 화면 보기 (저장 안 됨)</button></div>`);
+  document.addEventListener("click",e=>{ if(e.target.closest("[data-adj-demo]")) startDemo(); });
+}
+
+/* ---------- 7. 새 차종 판매실적 입력 (SCM) ---------- */
+SCREENS.rolemodelsales={ title:"새 차종 판매실적", html:()=>{
+  const series=(S.dataset&&S.dataset.series)||{}, N=Object.values(series)[0]?.length||24;
+  const pending=((W().models)||[]).filter(m=>!series[m]);
+  if(!pending.length) return `<div class="eyebrow">SCM · 판매실적</div><h1>판매실적이 필요한<br>새 차종이 없어요</h1><p class="lead">생산 탭에서 차종을 추가하면 여기서 월별 판매실적을 넣을 수 있어요.</p>`;
+  return `<div class="eyebrow">SCM · 판매실적</div><h1>새 차종의 월별 실적을<br>넣으면 예측에 들어가요</h1>
+    <p class="lead">${mLabel(0)}부터 ${mLabel(N-1)}까지 ${N}개월 판매대수를 쉼표나 줄바꿈으로 나눠 입력하세요. 빈 달은 0으로 넣어 주세요.</p>
+    <div class="work-form">
+      <label>차종<select class="field" id="adj-ms-model">${pending.map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join("")}</select></label>
+      <label>월별 판매대수 (${N}개)<textarea class="field" id="adj-ms-values" rows="5" placeholder="예: 120, 135, 150, ..."></textarea></label>
+      <div class="adj-now" id="adj-ms-count">0 / ${N}개 입력</div>
+      <button class="btn" data-adj-ms>판매실적 저장</button>
+    </div>`;
+}};
+document.addEventListener("input",e=>{ if(e.target.id!=="adj-ms-values") return;
+  const N=Object.values(S.dataset.series)[0]?.length||24, n=e.target.value.split(/[\s,]+/).filter(Boolean).length;
+  const el=document.getElementById("adj-ms-count"); if(el) el.textContent=`${n} / ${N}개 입력`; });
+document.addEventListener("click",async e=>{
+  if(!e.target.closest("[data-adj-ms]")) return;
+  const model=document.getElementById("adj-ms-model")?.value, N=Object.values(S.dataset.series)[0]?.length||24;
+  const vals=(document.getElementById("adj-ms-values")?.value||"").split(/[\s,]+/).filter(Boolean).map(Number);
+  if(!model) return toast("차종을 골라 주세요");
+  if(vals.length!==N||vals.some(v=>!Number.isFinite(v)||v<0)) return toast(`0 이상의 숫자 ${N}개를 입력해 주세요 (지금 ${vals.length}개)`);
+  try{
+    const series={...S.dataset.series,[model]:vals.map(v=>Math.round(v))};
+    await api("dataset",{method:"PUT",body:{start:S.dataset.start,series,orders:S.dataset.orders,note:`${model} 판매실적 ${N}개월 입력`}});
+    S.dataset.series=series; dirtyScreen=null; toast(model+" 판매실적을 저장했어요");
+    if(typeof poll==="function") void poll();
+    nav.replace("roleverify");
+  }catch(err){ toast(err.message||"저장하지 못했어요"); }
+});
+if(SCREENS.roleverify){
+  const vHtml=SCREENS.roleverify.html;
+  SCREENS.roleverify.html=()=>{ const h=vHtml(); const series=(S.dataset&&S.dataset.series)||{};
+    const pending=((W().models)||[]).filter(m=>!series[m]);
+    const tileH=`<div class="sec">새 차종 판매실적</div><button class="tapcard" data-go="rolemodelsales"><div class="grow"><b>새 차종 판매실적 입력 ›</b><div class="small">${pending.length?`실적이 없는 차종 ${pending.length}개: ${pending.map(esc).join(", ")}`:"실적이 필요한 새 차종이 없어요"}</div></div><span class="chev">›</span></button>`;
+    return h.replace('<p class="small" style="margin:15px 0">최근 월은', tileH+'<p class="small" style="margin:15px 0">최근 월은'); };
+  const prevTab=window.roleTabActive;
+  window.roleTabActive=id=>id==="rolemodelsales"?"roleoverview":prevTab(id);
+}
 const css=document.createElement("style");
 css.textContent=`.adj-toggle{display:flex;gap:6px;background:#F2F4F6;border-radius:12px;padding:4px;margin-bottom:10px}
 .adj-toggle button{flex:1;border:0;background:transparent;border-radius:9px;padding:10px 0;font-weight:700;color:#6B7684;font-size:15px}
 .adj-toggle button.on{background:#fff;color:#3182F6;box-shadow:0 1px 3px rgba(0,0,0,.08)}
 .adj-toggle button[data-adj-mode$="sub"].on{color:#F04452}
 .adj-add{border:0;background:#E8F3FF;color:#3182F6;font-weight:700;font-size:13px;border-radius:8px;padding:6px 10px}
+.adj-mini{border:0;background:#F2F4F6;color:#4E5968;font-weight:700;font-size:12px;border-radius:8px;padding:6px 8px;margin-left:6px;white-space:nowrap}
+.adj-mini.danger{background:#FFEEEE;color:#F04452}
+.adj-demo{display:block;width:100%;margin-top:28px;border:0;background:transparent;color:#8B95A1;font-size:13px;text-decoration:underline}
 .adj-now{font-size:13px;color:#4E5968;background:#F9FAFB;border-radius:10px;padding:9px 12px;margin:2px 0 8px}`;
 document.head.appendChild(css);
 })();
