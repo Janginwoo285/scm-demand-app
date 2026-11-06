@@ -6,10 +6,28 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 const LOCAL = process.env.LOCAL_STORE_DIR;
+const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+let pgPromise;
+async function pgClient() {
+  if (!pgPromise) pgPromise = import("@neondatabase/serverless").then(m => m.neon(DATABASE_URL));
+  return pgPromise;
+}
+async function pgGet(p) {
+  const sql = await pgClient();
+  const rows = await sql`SELECT payload FROM scm_state WHERE key = ${PREFIX + p}`;
+  if (!rows.length) return null;
+  return { txt: JSON.stringify(rows[0].payload) };
+}
+async function pgPut(p, txt) {
+  const sql = await pgClient();
+  await sql`INSERT INTO scm_state(key, payload, updated_at)
+            VALUES (${PREFIX + p}, ${JSON.parse(txt)}, now())
+            ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`;
+}
 const R_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
 const R_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
 const PREFIX = "scm:";
-export const STORE_KIND = LOCAL ? "local" : R_URL && R_TOKEN ? "upstash-redis" : "vercel-blob";
+export const STORE_KIND = LOCAL ? "local" : DATABASE_URL ? "postgres-neon" : R_URL && R_TOKEN ? "upstash-redis" : "vercel-blob";
 
 async function redis(cmd) {
   const r = await fetch(R_URL, { method: "POST", headers: { Authorization: `Bearer ${R_TOKEN}`, "content-type": "application/json" }, body: JSON.stringify(cmd) });
@@ -29,6 +47,7 @@ async function readRaw(p) {
   if (LOCAL) {
     try { return { txt: await fs.readFile(path.join(LOCAL, p), "utf8") }; } catch { return null; }
   }
+  if (STORE_KIND === "postgres-neon") return pgGet(p);
   if (STORE_KIND === "upstash-redis") {
     const v = await redis(["GET", PREFIX + p]);
     return v == null ? null : { txt: v };
@@ -52,6 +71,7 @@ async function writeRaw(p, txt) {
     await fs.writeFile(f, txt);
     return;
   }
+  if (STORE_KIND === "postgres-neon") { await pgPut(p, txt); return; }
   if (STORE_KIND === "upstash-redis") { await redis(["SET", PREFIX + p, txt]); return; }
   const { put } = await blob();
   await put(p, txt, { access: "private", addRandomSuffix: false, allowOverwrite: true, contentType: "application/json", cacheControlMaxAge: 60 });
@@ -74,6 +94,7 @@ export async function update(p, fallback, fn) {
 // 파일(키) 삭제
 export async function remove(p) {
   if (LOCAL) { await fs.rm(path.join(LOCAL, p), { force: true }); return; }
+  if (STORE_KIND === "postgres-neon") { const sql = await pgClient(); await sql`DELETE FROM scm_state WHERE key = ${PREFIX + p}`; return; }
   if (STORE_KIND === "upstash-redis") { await redis(["DEL", PREFIX + p]); return; }
   const { del } = await blob(); await del(p);
 }
