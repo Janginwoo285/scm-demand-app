@@ -63,12 +63,28 @@ export async function read(p, fallback) {
   return { data: JSON.parse(r.txt), etag: r.etag || null };
 }
 
-// 읽고-고치고-쓰기 (수업용 규모라 마지막 저장 우선으로 충분)
+// Redis 잠금: 같은 키를 동시에 고치면 한 명씩 차례로 처리해 입력이 사라지지 않게 한다.
+const UNLOCK = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end";
+async function withLock(p, fn) {
+  if (STORE_KIND !== "upstash-redis") return fn();
+  const key = PREFIX + "lock:" + p, token = Math.random().toString(36).slice(2) + Date.now();
+  for (let i = 0; ; i++) {
+    if (await redis(["SET", key, token, "NX", "PX", "8000"]) === "OK") break;
+    if (i >= 60) throw new Error("저장이 몰리고 있어요. 잠시 후 다시 시도해 주세요");
+    await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
+  }
+  try { return await fn(); }
+  finally { await redis(["EVAL", UNLOCK, "1", key, token]).catch(() => {}); }
+}
+
+// 읽고-고치고-쓰기 (Redis에서는 키별 잠금으로 동시 저장 충돌 방지)
 export async function update(p, fallback, fn) {
-  const { data } = await read(p, fallback);
-  const out = await fn(data);
-  await writeRaw(p, JSON.stringify(data));
-  return out;
+  return withLock(p, async () => {
+    const { data } = await read(p, fallback);
+    const out = await fn(data);
+    await writeRaw(p, JSON.stringify(data));
+    return out;
+  });
 }
 
 // 파일(키) 삭제
